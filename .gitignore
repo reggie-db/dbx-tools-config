@@ -1,0 +1,20 @@
+# uv lockfile (per project convention)
+uv.lock
+
+# Dot-prefixed files and directories
+.*
+# Keep these tracked
+!.gitignore
+!.gitattributes
+!.github/
+
+# Python build artifacts
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# OS
+Thumbs.db
