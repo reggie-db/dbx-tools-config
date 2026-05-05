@@ -6,12 +6,6 @@
 # from ``[dependency-groups].dev`` in pyproject.toml) and exposes the
 # project tasks as ``mise run <name>``.
 
-[tools]
-# Use whatever ``uv`` is already on PATH. Set to a version string (e.g.
-# ``"latest"`` or ``"0.9.5"``) if you want mise to manage the uv binary
-# itself - that requires GitHub API access.
-uv = "system"
-
 
 [tasks.test]
 description = "Run pytest"
