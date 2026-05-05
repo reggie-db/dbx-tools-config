@@ -1,4 +1,4 @@
-# dbx-config
+# dbx-tools-config
 
 Tiny wrapper around `databricks.sdk.config.Config` for **services that
 build a `Config` per request** from caller-supplied inputs - MCP
@@ -11,11 +11,11 @@ This module lets each request bring its own config-shaped inputs and
 materialise a `Config` (or just a fingerprint) from them. A typical
 mapping for an HTTP/MCP-style request:
 
-| Source                             | dbx-config layer  |
-| ---------------------------------- | ----------------- |
-| Request headers (env-shaped)       | `env=`            |
-| POST body / RPC payload `Config` fields | `**kwargs`        |
-| Pre-resolved `Config` baseline     | `config=`         |
+| Source                                  | dbx-tools-config layer |
+| --------------------------------------- | ---------------------- |
+| Request headers (env-shaped)            | `env=`                 |
+| POST body / RPC payload `Config` fields | `**kwargs`             |
+| Pre-resolved `Config` baseline          | `config=`              |
 
 Precedence is **`kwargs > env > config`** (last write wins). Every
 layer is optional.
@@ -25,45 +25,46 @@ layer is optional.
 Three public helpers, all with the same signature:
 
 ```python
-def params(
+def config_params(
     config: Config | None = None,
     env: Mapping[str, Iterable[str] | None] | None = None,
     **kwargs,
 ) -> dict[str, Any]: ...
 
-def create(
+def create_config(
     config: Config | None = None,
     env: Mapping[str, Iterable[str] | None] | None = None,
     **kwargs,
 ) -> Config: ...
 
-def param_hash(
+def config_params_hash(
     config: Config | None = None,
     env: Mapping[str, Iterable[str] | None] | None = None,
     **kwargs,
 ) -> str: ...
 ```
 
-- `params(...)` merges `config.as_dict()` + recognised `env` keys + `kwargs`
-  into a single dict suitable for `Config(**...)`.
-- `create(...)` is a one-liner for `Config(**params(...))`. **Expensive**:
-  triggers `Config.__init__`'s host-metadata HTTP probe, `~/.databrickscfg`
-  read and credential strategy bootstrap.
-- `param_hash(...)` returns a SHA-256 hex digest of the merged kwargs
-  after dropping fields in `_HASH_IGNORE_FIELDS`. **Cheap**: pure
-  in-memory compute, no `Config` constructed. See [Hashing](#hashing).
+- `config_params(...)` merges `config.as_dict()` + recognised `env` keys
+  + `kwargs` into a single dict suitable for `Config(**...)`.
+- `create_config(...)` is a one-liner for `Config(**config_params(...))`.
+  **Expensive**: triggers `Config.__init__`'s host-metadata HTTP probe,
+  `~/.databrickscfg` read and credential strategy bootstrap.
+- `config_params_hash(...)` returns a SHA-256 hex digest of the merged
+  kwargs after dropping fields in `_HASH_IGNORE_FIELDS`. **Cheap**:
+  pure in-memory compute, no `Config` constructed. See
+  [Hashing](#hashing).
 
 ## Install
 
 ```bash
-uv add 'dbx-config @ git+https://github.com/reggie-db/dbx-config'
+uv add 'dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config'
 ```
 
 or in `pyproject.toml`:
 
 ```toml
 dependencies = [
-    "dbx-config @ git+https://github.com/reggie-db/dbx-config",
+    "dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config",
 ]
 ```
 
@@ -72,13 +73,13 @@ dependencies = [
 ### Server-style: per-request Config from headers + body
 
 ```python
-import dbx_config
+import dbx_tools_config
 from databricks.sdk import WorkspaceClient
 
 # An MCP-style handler. Headers carry env-shaped names, the body
 # carries Config field overrides.
 def handle_request(request):
-    config = dbx_config.create(
+    config = dbx_tools_config.create_config(
         env=request.headers,         # e.g. {"DATABRICKS_HOST": "...",
                                      #       "DATABRICKS_TOKEN": "..."}
         **request.json(),            # e.g. {"warehouse_id": "abc",
@@ -91,26 +92,26 @@ def handle_request(request):
 
 ```python
 # From an arbitrary env-shaped mapping
-config = dbx_config.create(env={
+config = dbx_tools_config.create_config(env={
     "DATABRICKS_HOST": "https://myworkspace.cloud.databricks.com",
     "DATABRICKS_TOKEN": "dapi...",
 })
 
 # From the process environment (single-tenant CLIs, scripts, tests)
 import os
-config = dbx_config.create(env=os.environ)
+config = dbx_tools_config.create_config(env=os.environ)
 
 # Kwargs always win over env
-config = dbx_config.create(
+config = dbx_tools_config.create_config(
     host="https://override.cloud.databricks.com",
     env=client_env,
 )
 
 # Round-trip an existing Config (e.g. as a baseline)
-config = dbx_config.create(config=other_config, host="https://override...")
+config = dbx_tools_config.create_config(config=other_config, host="https://override...")
 
 # Just the merged kwargs, without constructing a Config
-kwargs = dbx_config.params(config=other_config, env=client_env)
+kwargs = dbx_tools_config.config_params(config=other_config, env=client_env)
 ```
 
 ## Env value semantics
@@ -161,16 +162,16 @@ A handful of `databricks-sdk` features read env vars directly from
 - `SYSTEM_ACCESSTOKEN`, `SYSTEM_*` (Azure DevOps OIDC)
 - `AGENT` (user-agent)
 
-Forwarding these through `dbx_config.create(env=...)` has no effect
-because they bypass `Config` entirely. If you need them in a service
-context, set them on `os.environ` of the worker process before
+Forwarding these through `dbx_tools_config.create_config(env=...)` has
+no effect because they bypass `Config` entirely. If you need them in a
+service context, set them on `os.environ` of the worker process before
 constructing the SDK client.
 
 ## Hashing
 
-`dbx_config.param_hash(...)` returns a stable SHA-256 hex digest of the
-resolved kwargs without constructing a `Config`. This matters because
-`Config.__init__` is **not** free - it does (in order):
+`dbx_tools_config.config_params_hash(...)` returns a stable SHA-256 hex
+digest of the resolved kwargs without constructing a `Config`. This
+matters because `Config.__init__` is **not** free - it does (in order):
 
 1. `_resolve_host_metadata` - HTTP `GET host/.well-known/databricks-config`
    to discover `account_id`, `workspace_id`, `cloud`, `discovery_url`.
@@ -185,16 +186,16 @@ identities, hashing first lets you cache (or rate-limit) clients
 without paying any of the above per request:
 
 ```python
-import dbx_config
+import dbx_tools_config
 from databricks.sdk import WorkspaceClient
 
 _clients: dict[str, WorkspaceClient] = {}
 
 def client_for(request):
-    key = dbx_config.param_hash(env=request.headers, **request.json())
+    key = dbx_tools_config.config_params_hash(env=request.headers, **request.json())
     client = _clients.get(key)
     if client is None:
-        config = dbx_config.create(env=request.headers, **request.json())
+        config = dbx_tools_config.create_config(env=request.headers, **request.json())
         client = _clients[key] = WorkspaceClient(config=config)
     return client
 ```

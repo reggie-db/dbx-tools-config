@@ -27,15 +27,15 @@ HTTP/RPC frames expose headers) or ``None``.
 
 Two helpers cover the per-request lifecycle:
 
-* :func:`create` builds a real :class:`Config`. This is the expensive
-  path: ``Config.__init__`` resolves host metadata over HTTP
+* :func:`create_config` builds a real :class:`Config`. This is the
+  expensive path: ``Config.__init__`` resolves host metadata over HTTP
   (``/.well-known/databricks-config`` GET), reads ``~/.databrickscfg``
   from disk and runs ``init_auth`` (which can itself touch the network
   or filesystem depending on the credential strategy).
-* :func:`param_hash` returns a stable SHA-256 fingerprint of the same
-  resolved inputs, computed entirely in-memory. Use it to cache or
-  rate-limit per-identity clients without paying ``Config.__init__``'s
-  cost on every request.
+* :func:`config_params_hash` returns a stable SHA-256 fingerprint of
+  the same resolved inputs, computed entirely in-memory. Use it to
+  cache or rate-limit per-identity clients without paying
+  ``Config.__init__``'s cost on every request.
 
 Note: env values are passed to :class:`Config` as-is. The SDK's
 descriptor ``transform`` (typically the annotated type, plus custom
@@ -44,21 +44,22 @@ does not do its own string-to-bool/int/float coercion.
 """
 
 
-"""Type alias for the ``env`` argument to :func:`params`, :func:`create`
-and :func:`param_hash`.
+"""Type alias for the ``env`` argument to :func:`config_params`,
+:func:`create_config` and :func:`config_params_hash`.
 
 An env-shaped mapping where each value is either a single ``str``, an
 ``Iterable[str]`` (first element wins, matching multi-value HTTP /
 multidict frames) or ``None``."""
 ConfigEnv = Mapping[str, Iterable[str] | str | None] | Iterable[tuple[str, str | None]]
 
-"""Fields stripped from :func:`param_hash` because they identify *where*
-config came from (``profile`` / ``config_file`` / ``databricks_cli_path``
-- lookup hints) or are *derived* during ``Config.__init__`` from other
-already-hashed fields (``auth_type`` is written by ``init_auth`` from the
-credential strategy; ``databricks_environment`` is derived from ``host``).
-Two configs that resolve to the same logical identity via different load
-paths or credential strategies produce the same fingerprint."""
+"""Fields stripped from :func:`config_params_hash` because they identify
+*where* config came from (``profile`` / ``config_file`` /
+``databricks_cli_path`` - lookup hints) or are *derived* during
+``Config.__init__`` from other already-hashed fields (``auth_type`` is
+written by ``init_auth`` from the credential strategy;
+``databricks_environment`` is derived from ``host``). Two configs that
+resolve to the same logical identity via different load paths or
+credential strategies produce the same fingerprint."""
 _HASH_IGNORE_FIELDS = [
     "profile",
     "config_file",
@@ -68,7 +69,7 @@ _HASH_IGNORE_FIELDS = [
 ]
 
 
-def params(
+def config_params(
     config: Config | None = None,
     env: ConfigEnv | None = None,
     **kwargs,
@@ -93,10 +94,10 @@ def params(
 
     Unknown env keys are silently ignored.
     """
-    config_params: dict[str, Any] = {}
+    merged: dict[str, Any] = {}
 
     if config:
-        config_params.update(config.as_dict())
+        merged.update(config.as_dict())
 
     if env:
         if not isinstance(env, Mapping):
@@ -112,18 +113,18 @@ def params(
         for env_key, attribute in _env_attributes().items():
             value = env_map.get(env_key, None)
             if value is None or isinstance(value, str):
-                config_params[attribute.name] = value
+                merged[attribute.name] = value
             else:
                 for item in value:
-                    config_params[attribute.name] = item
+                    merged[attribute.name] = item
                     break
 
-    config_params.update(kwargs)
+    merged.update(kwargs)
 
-    return config_params
+    return merged
 
 
-def param_hash(
+def config_params_hash(
     config: Config | None = None,
     env: ConfigEnv | None = None,
     **kwargs,
@@ -131,16 +132,16 @@ def param_hash(
     """Return a stable SHA-256 hex digest of the resolved Config kwargs.
 
     Designed as a cache or rate-limit key for the same caller inputs
-    that would be passed to :func:`create`. This is the cheap path: it
-    operates purely on the merged dict and never constructs a
+    that would be passed to :func:`create_config`. This is the cheap
+    path: it operates purely on the merged dict and never constructs a
     :class:`Config`. Constructing a :class:`Config` triggers
     ``_resolve_host_metadata`` (HTTP GET to ``host``'s
     ``/.well-known/databricks-config``), ``_known_file_config_loader``
     (filesystem read of ``~/.databrickscfg``) and ``init_auth`` (which
     can itself touch the network or filesystem depending on the
     credential strategy). A service that wants to dedupe per-caller
-    clients should fingerprint with :func:`param_hash` first and only
-    call :func:`create` on cache miss.
+    clients should fingerprint with :func:`config_params_hash` first
+    and only call :func:`create_config` on cache miss.
 
     Fields in :data:`_HASH_IGNORE_FIELDS` are stripped before hashing
     (file lookup hints and derived auth metadata) so two callers that
@@ -181,27 +182,28 @@ def param_hash(
         else:
             _update(value, quote=True)
 
-    config_params = {}
-    for key, value in params(config, env, **kwargs).items():
+    filtered: dict[str, Any] = {}
+    for key, value in config_params(config, env, **kwargs).items():
         if key not in _HASH_IGNORE_FIELDS:
-            config_params[key] = value
+            filtered[key] = value
 
-    _hash(config_params)
+    _hash(filtered)
     return hasher.hexdigest()
 
 
-def create(
+def create_config(
     config: Config | None = None,
     env: ConfigEnv | None = None,
     **kwargs,
 ) -> Config:
     """Build a new :class:`Config` from ``config`` + ``env`` + ``kwargs``.
 
-    Equivalent to ``Config(**params(config, env, **kwargs))``. See
-    :func:`params` for the precedence rules and ``env`` value semantics.
+    Equivalent to ``Config(**config_params(config, env, **kwargs))``.
+    See :func:`config_params` for the precedence rules and ``env``
+    value semantics.
     """
 
-    return Config(**params(config, env, **kwargs))
+    return Config(**config_params(config, env, **kwargs))
 
 
 @functools.cache
@@ -253,19 +255,19 @@ def _is_collection(value: Any) -> TypeGuard[Collection[Any]]:
 
 
 if __name__ == "__main__":
-    config = create(env={"DATABRICKS_CONFIG_PROFILE": ["RACETRAC-DEV"]})
+    config = create_config(env={"DATABRICKS_CONFIG_PROFILE": ["RACETRAC-DEV"]})
     print(config.as_dict())
-    config = create(env={"DATABRICKS_CONFIG_PROFILE": ["DEFAULT"]})
+    config = create_config(env={"DATABRICKS_CONFIG_PROFILE": ["DEFAULT"]})
     print(config.as_dict())
-    print(param_hash(config))
-    config = create(
+    print(config_params_hash(config))
+    config = create_config(
         env={
             "DATABRICKS_CONFIG_PROFILE": ["DEFAULT"],
             "DATABRICKS_CONFIG_FILE": "~/.databrickscfg",
         }
     )
     print(config.as_dict())
-    print(param_hash(config))
+    print(config_params_hash(config))
     config = Config()
     print(config.as_dict())
-    print(param_hash(config))
+    print(config_params_hash(config))

@@ -4,21 +4,21 @@ from typing import Any
 
 import pytest
 
-import dbx_config
-from dbx_config import (
+import dbx_tools_config
+from dbx_tools_config import (
     _HASH_IGNORE_FIELDS,
     _env_attributes,
-    create,
-    param_hash,
-    params,
+    config_params,
+    config_params_hash,
+    create_config,
 )
 
-"""Tests for :mod:`dbx_config`.
+"""Tests for :mod:`dbx_tools_config`.
 
-Covers the three public helpers (``params``, ``create``, ``param_hash``),
-the cached env-name lookup (``_env_attributes``) and the
-``_HASH_IGNORE_FIELDS`` constant. ``Config`` construction is stubbed so
-nothing here hits the network.
+Covers the three public helpers (``config_params``, ``create_config``,
+``config_params_hash``), the cached env-name lookup
+(``_env_attributes``) and the ``_HASH_IGNORE_FIELDS`` constant.
+``Config`` construction is stubbed so nothing here hits the network.
 """
 
 
@@ -27,7 +27,7 @@ nothing here hits the network.
 
 class TestEnvAttributes:
     def test_returns_non_empty_mapping(self):
-        # Don't call ``create()`` here: it would build a real
+        # Don't call ``create_config()`` here: it would build a real
         # :class:`Config` which fails on a clean CI runner with no
         # credentials. ``_env_attributes()`` only needs
         # ``Config.attributes()`` (a classmethod), not an instance.
@@ -95,15 +95,16 @@ class TestHashIgnoreFields:
     )
     def test_does_not_ignore_identity_fields(self, field):
         # Identity-bearing fields must NOT be in the ignore list, otherwise
-        # ``param_hash`` would collapse distinct identities.
+        # ``config_params_hash`` would collapse distinct identities.
         assert field not in _HASH_IGNORE_FIELDS
 
 
-# ---------- params() ----------
+# ---------- config_params() ----------
 
 
 class _ConfigStub:
-    """Stand-in with a Config-shaped ``as_dict()`` for params()/param_hash()."""
+    """Stand-in with a Config-shaped ``as_dict()`` for
+    ``config_params()`` / ``config_params_hash()``."""
 
     def __init__(self, **fields: Any) -> None:
         self._fields = fields
@@ -112,50 +113,50 @@ class _ConfigStub:
         return dict(self._fields)
 
 
-class TestParams:
+class TestConfigParams:
     def test_no_inputs_returns_empty(self):
-        assert params() == {}
+        assert config_params() == {}
 
     def test_kwargs_only(self):
-        assert params(host="https://x", token="y") == {
+        assert config_params(host="https://x", token="y") == {
             "host": "https://x",
             "token": "y",
         }
 
     def test_config_baseline_forwarded(self):
         cfg = _ConfigStub(host="https://x", token="y")
-        assert params(config=cfg) == {"host": "https://x", "token": "y"}  # pyright: ignore[reportArgumentType]
+        assert config_params(config=cfg) == {"host": "https://x", "token": "y"}  # pyright: ignore[reportArgumentType]
 
     def test_env_str_value(self):
-        out = params(env={"DATABRICKS_HOST": "https://env"})
+        out = config_params(env={"DATABRICKS_HOST": "https://env"})
         assert out["host"] == "https://env"
 
     def test_env_iterable_first_wins(self):
-        out = params(env={"DATABRICKS_HOST": ["https://a", "https://b"]})
+        out = config_params(env={"DATABRICKS_HOST": ["https://a", "https://b"]})
         assert out["host"] == "https://a"
 
     def test_env_iterator_first_wins(self):
-        out = params(env={"DATABRICKS_HOST": iter(["https://a", "https://b"])})
+        out = config_params(env={"DATABRICKS_HOST": iter(["https://a", "https://b"])})
         assert out["host"] == "https://a"
 
     def test_env_empty_iterable_leaves_field_unset(self):
         # The inner ``for value in value`` never executes, so the
         # attribute name is never assigned in this branch.
-        out = params(env={"DATABRICKS_HOST": []})
+        out = config_params(env={"DATABRICKS_HOST": []})
         assert "host" not in out
 
     def test_env_explicit_none_sets_none(self):
-        out = params(env={"DATABRICKS_HOST": None})
+        out = config_params(env={"DATABRICKS_HOST": None})
         assert out["host"] is None
 
     def test_env_alias_resolves(self):
-        out = params(env={"DATABRICKS_OIDC_TOKEN_FILE": "/path"})
+        out = config_params(env={"DATABRICKS_OIDC_TOKEN_FILE": "/path"})
         assert out["oidc_token_filepath"] == "/path"
 
     def test_env_alias_overrides_primary_when_both_provided(self):
         # Iteration order is primary first, alias second; the alias write
         # is therefore last-write-wins for the shared attribute name.
-        out = params(
+        out = config_params(
             env={
                 "DATABRICKS_OIDC_TOKEN_FILEPATH": "/primary",
                 "DATABRICKS_OIDC_TOKEN_FILE": "/alias",
@@ -164,37 +165,37 @@ class TestParams:
         assert out["oidc_token_filepath"] == "/alias"
 
     def test_env_unknown_key_ignored(self):
-        out = params(env={"NOT_A_DATABRICKS_ENV_VAR": "x"})
+        out = config_params(env={"NOT_A_DATABRICKS_ENV_VAR": "x"})
         assert "NOT_A_DATABRICKS_ENV_VAR" not in out
         # The unknown value must not leak under any field name.
         assert "x" not in out.values()
 
     def test_kwargs_win_over_env(self):
-        out = params(host="https://kwargs", env={"DATABRICKS_HOST": "https://env"})
+        out = config_params(host="https://kwargs", env={"DATABRICKS_HOST": "https://env"})
         assert out["host"] == "https://kwargs"
 
     def test_env_wins_over_config(self):
         cfg = _ConfigStub(host="https://config")
-        out = params(config=cfg, env={"DATABRICKS_HOST": "https://env"})  # pyright: ignore[reportArgumentType]
+        out = config_params(config=cfg, env={"DATABRICKS_HOST": "https://env"})  # pyright: ignore[reportArgumentType]
         assert out["host"] == "https://env"
 
     def test_kwargs_win_over_config(self):
         cfg = _ConfigStub(host="https://config")
-        out = params(config=cfg, host="https://kwargs")  # pyright: ignore[reportArgumentType]
+        out = config_params(config=cfg, host="https://kwargs")  # pyright: ignore[reportArgumentType]
         assert out["host"] == "https://kwargs"
 
     def test_empty_env_does_not_iterate(self):
         # An empty mapping is falsy so the env loop is skipped entirely,
         # leaving the config baseline intact.
         cfg = _ConfigStub(host="https://config")
-        out = params(config=cfg, env={})  # pyright: ignore[reportArgumentType]
+        out = config_params(config=cfg, env={})  # pyright: ignore[reportArgumentType]
         assert out == {"host": "https://config"}
 
     def test_env_iteration_writes_none_for_missing_keys(self):
         # Documented (current) behavior: providing *any* env triggers
         # iteration over every known env name, so missing keys end up as
         # ``None`` in the result.
-        out = params(env={"DATABRICKS_TOKEN": "y"})
+        out = config_params(env={"DATABRICKS_TOKEN": "y"})
         assert out["token"] == "y"
         assert out["host"] is None
         assert out["cluster_id"] is None
@@ -205,13 +206,13 @@ class TestParams:
         # the only way to preserve a baseline value when ``env`` is also
         # passed.
         cfg = _ConfigStub(host="https://config", token="t")
-        out = params(config=cfg, env={"DATABRICKS_CLUSTER_ID": "c-1"})  # pyright: ignore[reportArgumentType]
+        out = config_params(config=cfg, env={"DATABRICKS_CLUSTER_ID": "c-1"})  # pyright: ignore[reportArgumentType]
         assert out["cluster_id"] == "c-1"
         assert out["host"] is None
         assert out["token"] is None
 
 
-# ---------- create() ----------
+# ---------- create_config() ----------
 
 
 class _RecordingConfig:
@@ -225,63 +226,64 @@ class _RecordingConfig:
 
 @pytest.fixture
 def stub_config(monkeypatch):
-    """Replace ``dbx_config.Config`` with a recording stub for ``create()``.
+    """Replace ``dbx_tools_config.Config`` with a recording stub for
+    ``create_config()``.
 
     Pre-warms ``_env_attributes`` first so the @functools.cache populates
     against the real SDK class before the patch hides it.
     """
 
     _env_attributes()
-    monkeypatch.setattr(dbx_config, "Config", _RecordingConfig)
+    monkeypatch.setattr(dbx_tools_config, "Config", _RecordingConfig)
     return _RecordingConfig
 
 
-class TestCreate:
+class TestCreateConfig:
     def test_returns_config_instance(self, stub_config):
-        assert isinstance(create(host="https://x"), stub_config)
+        assert isinstance(create_config(host="https://x"), stub_config)
 
     def test_no_inputs_calls_config_with_no_kwargs(self, stub_config):
-        create()
+        create_config()
         assert stub_config.last_kwargs == {}
 
     def test_kwargs_only(self, stub_config):
-        create(host="https://x")
+        create_config(host="https://x")
         assert stub_config.last_kwargs == {"host": "https://x"}
 
     def test_env_only(self, stub_config):
-        create(env={"DATABRICKS_HOST": "https://env"})
+        create_config(env={"DATABRICKS_HOST": "https://env"})
         assert stub_config.last_kwargs["host"] == "https://env"
 
     def test_kwargs_win_over_env(self, stub_config):
-        create(host="https://kwargs", env={"DATABRICKS_HOST": "https://env"})
+        create_config(host="https://kwargs", env={"DATABRICKS_HOST": "https://env"})
         assert stub_config.last_kwargs["host"] == "https://kwargs"
 
     def test_alias_resolves(self, stub_config):
-        create(env={"DATABRICKS_OIDC_TOKEN_FILE": "/path"})
+        create_config(env={"DATABRICKS_OIDC_TOKEN_FILE": "/path"})
         assert stub_config.last_kwargs["oidc_token_filepath"] == "/path"
 
 
-# ---------- param_hash() ----------
+# ---------- config_params_hash() ----------
 
 
-class TestParamHash:
+class TestConfigParamsHash:
     def test_returns_sha256_hex(self):
-        digest = param_hash(host="https://x")
+        digest = config_params_hash(host="https://x")
         assert len(digest) == 64
         assert all(c in "0123456789abcdef" for c in digest)
 
     def test_deterministic(self):
-        a = param_hash(host="https://x", token="t")
-        b = param_hash(host="https://x", token="t")
+        a = config_params_hash(host="https://x", token="t")
+        b = config_params_hash(host="https://x", token="t")
         assert a == b
 
     def test_no_inputs_is_stable_across_calls(self):
         # Don't pin the exact byte format (the streaming layout has
         # changed several times); just assert two no-input calls match.
-        assert param_hash() == param_hash()
+        assert config_params_hash() == config_params_hash()
 
     def test_different_host_changes_hash(self):
-        assert param_hash(host="https://a") != param_hash(host="https://b")
+        assert config_params_hash(host="https://a") != config_params_hash(host="https://b")
 
     @pytest.mark.parametrize(
         "field,extra_value",
@@ -294,41 +296,41 @@ class TestParamHash:
         ],
     )
     def test_identity_fields_change_hash(self, field, extra_value):
-        base = param_hash(host="https://x")
-        with_extra = param_hash(host="https://x", **{field: extra_value})
+        base = config_params_hash(host="https://x")
+        with_extra = config_params_hash(host="https://x", **{field: extra_value})
         assert with_extra != base
 
     @pytest.mark.parametrize("ignored", _HASH_IGNORE_FIELDS)
     def test_ignored_fields_do_not_change_hash(self, ignored):
-        base = param_hash(host="https://x")
-        with_ignored = param_hash(host="https://x", **{ignored: "anything"})  # pyright: ignore[reportArgumentType]
+        base = config_params_hash(host="https://x")
+        with_ignored = config_params_hash(host="https://x", **{ignored: "anything"})  # pyright: ignore[reportArgumentType]
         assert with_ignored == base
 
     def test_none_and_empty_string_hash_the_same(self):
         # ``None`` collapses to ``""`` before encoding so an explicit
         # ``None`` value hashes the same as an explicit empty string.
-        assert param_hash(host=None) == param_hash(host="")
+        assert config_params_hash(host=None) == config_params_hash(host="")
 
     def test_iterable_value_uses_first_element(self):
         # Going through ``env``, the iterable resolves to its first
         # element before hashing; everything else is set to ``None`` by
         # the env iteration so both calls produce identical inputs.
-        a = param_hash(env={"DATABRICKS_HOST": ["https://a", "https://b"]})
-        b = param_hash(env={"DATABRICKS_HOST": "https://a"})
+        a = config_params_hash(env={"DATABRICKS_HOST": ["https://a", "https://b"]})
+        b = config_params_hash(env={"DATABRICKS_HOST": "https://a"})
         assert a == b
 
     def test_kwarg_order_does_not_change_hash(self):
         # The merged params are sorted internally before hashing so
         # caller kwarg order must not leak into the digest.
-        a = param_hash(host="https://x", token="t", cluster_id="c-1")
-        b = param_hash(cluster_id="c-1", token="t", host="https://x")
+        a = config_params_hash(host="https://x", token="t", cluster_id="c-1")
+        b = config_params_hash(cluster_id="c-1", token="t", host="https://x")
         assert a == b
 
     def test_config_baseline_equivalent_to_kwargs(self):
         # Hashing a config baseline must produce the same digest as
         # passing the same fields directly via kwargs.
         cfg = _ConfigStub(host="https://x", token="t")
-        assert param_hash(config=cfg) == param_hash(host="https://x", token="t")  # pyright: ignore[reportArgumentType]
+        assert config_params_hash(config=cfg) == config_params_hash(host="https://x", token="t")  # pyright: ignore[reportArgumentType]
 
 
 # ---------- ConfigEnv shape equivalence ----------
@@ -341,7 +343,7 @@ def _items() -> list[tuple[str, str | None]]:
 
 # Each entry is ``(id, factory)``. The factory is called per-assertion
 # because some forms (generators, iterators) are one-shot and can't be
-# reused between the params() and param_hash() calls.
+# reused between the config_params() and config_params_hash() calls.
 _CONFIG_ENV_FORMS: list[tuple[str, Any]] = [
     ("mapping_str_value", lambda: dict(_items())),
     ("mapping_list_value", lambda: {k: [v] for k, v in _items()}),
@@ -358,29 +360,30 @@ _FORM_FACTORIES = [pair[1] for pair in _CONFIG_ENV_FORMS]
 
 
 def _baseline_params() -> dict[str, Any]:
-    return params(env=dict(_items()))
+    return config_params(env=dict(_items()))
 
 
 def _baseline_hash() -> str:
-    return param_hash(env=dict(_items()))
+    return config_params_hash(env=dict(_items()))
 
 
 class TestConfigEnvForms:
-    """Every shape allowed by :data:`dbx_config.ConfigEnv` must resolve
-    to the same ``params()`` dict and the same ``param_hash()`` digest."""
+    """Every shape allowed by :data:`dbx_tools_config.ConfigEnv` must
+    resolve to the same ``config_params()`` dict and the same
+    ``config_params_hash()`` digest."""
 
     @pytest.mark.parametrize("env_factory", _FORM_FACTORIES, ids=_FORM_IDS)
     def test_form_resolves_to_same_params(self, env_factory):
-        assert params(env=env_factory()) == _baseline_params()
+        assert config_params(env=env_factory()) == _baseline_params()
 
     @pytest.mark.parametrize("env_factory", _FORM_FACTORIES, ids=_FORM_IDS)
     def test_form_produces_same_param_hash(self, env_factory):
-        assert param_hash(env=env_factory()) == _baseline_hash()
+        assert config_params_hash(env=env_factory()) == _baseline_hash()
 
     def test_iterable_of_tuples_first_value_wins_for_duplicate_keys(self):
         # Mirrors the Mapping form's first-wins-on-iterable behaviour.
         env = [("DATABRICKS_HOST", "https://a"), ("DATABRICKS_HOST", "https://b")]
-        assert params(env=env)["host"] == "https://a"
+        assert config_params(env=env)["host"] == "https://a"
 
     def test_iterable_of_tuples_matches_mapping_with_list_value(self):
         # ``[("X", "a"), ("X", "b")]`` must resolve identically to
@@ -391,12 +394,12 @@ class TestConfigEnvForms:
             ("DATABRICKS_HOST", "https://b"),
         ]
         as_mapping = {"DATABRICKS_HOST": ["https://a", "https://b"]}
-        assert params(env=as_tuples) == params(env=as_mapping)
-        assert param_hash(env=as_tuples) == param_hash(env=as_mapping)
+        assert config_params(env=as_tuples) == config_params(env=as_mapping)
+        assert config_params_hash(env=as_tuples) == config_params_hash(env=as_mapping)
 
     def test_iterable_of_tuples_with_none_value_matches_mapping_none(self):
         # ``[("X", None)]`` must resolve identically to ``{"X": None}``.
         as_tuples = [("DATABRICKS_HOST", None)]
         as_mapping = {"DATABRICKS_HOST": None}
-        assert params(env=as_tuples) == params(env=as_mapping)
-        assert param_hash(env=as_tuples) == param_hash(env=as_mapping)
+        assert config_params(env=as_tuples) == config_params(env=as_mapping)
+        assert config_params_hash(env=as_tuples) == config_params_hash(env=as_mapping)
