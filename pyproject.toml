@@ -1,5 +1,7 @@
 [build-system]
-requires = ["uv_build>=0.9"]
+# Upper bound matches the next minor of the currently-released uv_build
+# series (0.11.x), as recommended by the uv docs.
+requires = ["uv_build>=0.9,<0.12"]
 build-backend = "uv_build"
 
 [project]
@@ -9,7 +11,10 @@ description = "Build and fingerprint databricks.sdk Config instances from server
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["databricks-sdk"]
-license = { file = "LICENSE" }
+# PEP 639: SPDX identifier in ``license`` plus explicit ``license-files``;
+# the deprecated ``License :: OSI Approved :: ...`` classifier is gone.
+license = "Unlicense"
+license-files = ["LICENSE"]
 keywords = [
     "databricks",
     "databricks-sdk",
@@ -21,7 +26,6 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: The Unlicense (Unlicense)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
