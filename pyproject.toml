@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "dbx-config"
-version = "0.1.0"
+version = "0.1.1"
 description = "Build and fingerprint databricks.sdk Config instances from server-supplied env or kwargs."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -48,7 +48,7 @@ select = ["E", "F", "UP", "B", "SIM", "I"]
 ignore = []
 
 [tool.bumpversion]
-current_version = "0.1.0"
+current_version = "0.1.1"
 commit = true
 tag = true
 
