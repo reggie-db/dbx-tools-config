@@ -27,7 +27,10 @@ nothing here hits the network.
 
 class TestEnvAttributes:
     def test_returns_non_empty_mapping(self):
-        dbx_config.create()
+        # Don't call ``create()`` here: it would build a real
+        # :class:`Config` which fails on a clean CI runner with no
+        # credentials. ``_env_attributes()`` only needs
+        # ``Config.attributes()`` (a classmethod), not an instance.
         attrs = _env_attributes()
         assert isinstance(attrs, dict)
         assert attrs
