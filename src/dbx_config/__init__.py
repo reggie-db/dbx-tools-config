@@ -1,256 +1,271 @@
 from __future__ import annotations
 
 import functools
-import inspect
-import types
-from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any, Union, get_args, get_origin, get_type_hints
+import hashlib
+import json
+from collections.abc import Collection, Iterable, Mapping
+from typing import Any, TypeGuard
 
-from databricks.sdk.config import Config
+from databricks.sdk.config import Config, ConfigAttribute
 
-"""Environment-aware factory for :class:`databricks.sdk.config.Config`.
+"""Build and fingerprint :class:`databricks.sdk.config.Config` instances
+from server-supplied inputs.
 
-Designed for services (MCP servers, brokers, multi-tenant backends, etc.)
-that need to build a per-request ``Config`` from client-supplied env vars
-forwarded as-is, rather than reading ``os.environ`` of the host process.
-The SDK's own auto-discovery only consults the process env, which is the
-wrong scope for a service serving many callers.
+The primary use case is a service - MCP server, broker, sidecar,
+multi-tenant backend - that needs to materialise a per-request
+:class:`Config` from inputs that arrive on the wire. A typical mapping:
 
-Wraps the SDK's ``Config`` with a small helper that accepts an explicit
-``env`` mapping in addition to keyword arguments and coerces string values
-into the types declared on the matching ``Config`` attribute
-(``bool`` / ``int`` / ``float`` / ``str``).
+* HTTP headers (or env-shaped frames forwarded by the client) -> ``env``.
+* POST-body / RPC-payload Config fields -> ``**kwargs``.
+* An optional pre-resolved :class:`Config` -> ``config``, used as a
+  baseline when augmenting an existing identity.
 
-Env keys are resolved in this order:
+Precedence is ``kwargs > env > config`` (last write wins) and every
+layer is optional. ``env`` values may be a single ``str``, an
+``Iterable[str]`` (first element wins, matching how multi-value
+HTTP/RPC frames expose headers) or ``None``.
 
-* explicit ``ConfigAttribute.env`` and ``env_aliases`` declared on the SDK,
-* ``DATABRICKS_<NAME>`` -> ``<name>``,
-* ``ARM_<NAME>`` -> ``azure_<name>``.
+Two helpers cover the per-request lifecycle:
 
-Keyword arguments to :func:`create` always win over ``env`` values.
+* :func:`create` builds a real :class:`Config`. This is the expensive
+  path: ``Config.__init__`` resolves host metadata over HTTP
+  (``/.well-known/databricks-config`` GET), reads ``~/.databrickscfg``
+  from disk and runs ``init_auth`` (which can itself touch the network
+  or filesystem depending on the credential strategy).
+* :func:`param_hash` returns a stable SHA-256 fingerprint of the same
+  resolved inputs, computed entirely in-memory. Use it to cache or
+  rate-limit per-identity clients without paying ``Config.__init__``'s
+  cost on every request.
+
+Note: env values are passed to :class:`Config` as-is. The SDK's
+descriptor ``transform`` (typically the annotated type, plus custom
+transforms for ``cloud`` / ``scopes``) does any conversion. This module
+does not do its own string-to-bool/int/float coercion.
 """
 
-# ---------- Constants ----------
 
-_DATABRICKS_PREFIX = "DATABRICKS_"
-_ARM_PREFIX = "ARM_"
-_TRUE_VALUES = {"1", "true", "yes", "y", "on"}
-_FALSE_VALUES = {"0", "false", "no", "n", "off"}
+"""Type alias for the ``env`` argument to :func:`params`, :func:`create`
+and :func:`param_hash`.
 
-# ---------- ConfigParam ----------
+An env-shaped mapping where each value is either a single ``str``, an
+``Iterable[str]`` (first element wins, matching multi-value HTTP /
+multidict frames) or ``None``."""
+ConfigEnv = Mapping[str, Iterable[str] | str | None] | Iterable[tuple[str, str | None]]
+
+"""Fields stripped from :func:`param_hash` because they identify *where*
+config came from (``profile`` / ``config_file`` / ``databricks_cli_path``
+- lookup hints) or are *derived* during ``Config.__init__`` from other
+already-hashed fields (``auth_type`` is written by ``init_auth`` from the
+credential strategy; ``databricks_environment`` is derived from ``host``).
+Two configs that resolve to the same logical identity via different load
+paths or credential strategies produce the same fingerprint."""
+_HASH_IGNORE_FIELDS = [
+    "profile",
+    "config_file",
+    "databricks_cli_path",
+    "auth_type",
+    "databricks_environment",
+]
 
 
-@dataclass(frozen=True)
-class _ConfigParam:
-    """Resolved metadata for a single :class:`Config` attribute.
+def params(
+    config: Config | None = None,
+    env: ConfigEnv | None = None,
+    **kwargs,
+) -> dict[str, Any]:
+    """Merge ``config`` + ``env`` + ``kwargs`` into a single kwargs dict
+    suitable for ``Config(**...)``.
 
-    ``base_type`` is the unwrapped runtime type used to coerce env values
-    (e.g. for ``int | None`` ``base_type`` is ``int`` and ``nullable`` is
-    ``True``). ``env_names`` are the env var keys that should map directly
-    to this field, including any aliases declared on the SDK descriptor.
+    Precedence (last write wins):
+
+    1. ``config.as_dict()`` if ``config`` is provided.
+    2. ``env`` values, keyed by the SDK's declared
+       :attr:`ConfigAttribute.env` name (or any
+       :attr:`ConfigAttribute.env_aliases`). Each value may be:
+
+       * a string - used directly,
+       * ``None`` - sets the field to ``None`` (explicitly clearing
+         anything inherited from ``config``),
+       * an iterable of strings - the first element is used; an empty
+         iterable leaves the field untouched.
+
+    3. ``kwargs``.
+
+    Unknown env keys are silently ignored.
     """
+    config_params: dict[str, Any] = {}
 
-    name: str
-    annotation: Any
-    base_type: Any
-    nullable: bool
-    env_names: tuple[str, ...] = ()
-
-    @staticmethod
-    def from_annotation(
-        name: str, ann: Any, env_names: tuple[str, ...] = ()
-    ) -> "_ConfigParam":
-        """Build a ``_ConfigParam`` from a type annotation.
-
-        Strips a single ``Optional[...]`` / ``T | None`` layer to recover
-        the coercion target. Anything ambiguous (``Union[int, str]``,
-        missing annotation, ``Any``) falls back to ``base_type=str`` so
-        values are passed through unchanged.
-        """
-        if ann in {inspect.Parameter.empty, Any}:
-            return _ConfigParam(
-                name=name,
-                annotation=ann,
-                base_type=str,
-                nullable=True,
-                env_names=env_names,
-            )
-
-        origin = get_origin(ann)
-        args = get_args(ann)
-        base_type = ann
-        nullable = False
-        if origin in {types.UnionType, Union}:
-            non_none = [a for a in args if a is not type(None)]
-            base_type = non_none[0] if len(non_none) == 1 else Any
-            nullable = type(None) in args
-
-        return _ConfigParam(
-            name=name,
-            annotation=ann,
-            base_type=base_type,
-            nullable=nullable,
-            env_names=env_names,
-        )
-
-
-# ---------- Public API ----------
-
-
-def create(*args, env: Mapping[str, str] | None = None, **kwargs) -> Config:
-    """Build a :class:`Config` from kwargs plus an explicit ``env`` mapping.
-
-    Each ``env`` key is mapped to a ``Config`` field via the SDK's declared
-    env names (and aliases) or the ``DATABRICKS_`` / ``ARM_`` conventions.
-    Values for known fields are coerced into their declared type; unknown
-    keys are ignored. Keyword arguments take precedence over ``env``.
-    """
-    config_kwargs = kwargs.copy()
+    if config:
+        config_params.update(config.as_dict())
 
     if env:
-        for key, value in env.items():
-            field = _env_key_to_field(key)
+        if not isinstance(env, Mapping):
+            env_map: Mapping = {}
+            for item in env:
+                env_key = item[0]
+                if env_key not in env_map:
+                    env_map[env_key] = []
+                env_map[env_key].append(item[1])
+        else:
+            env_map: Mapping = env
 
-            if not field or field in config_kwargs:
-                continue
+        for env_key, attribute in _env_attributes().items():
+            value = env_map.get(env_key, None)
+            if value is None or isinstance(value, str):
+                config_params[attribute.name] = value
+            else:
+                for item in value:
+                    config_params[attribute.name] = item
+                    break
 
-            meta = _config_params().get(field)
-
-            if not meta:
-                continue
-
-            config_kwargs[field] = _coerce_value(value, meta)
-
-    return Config(*args, **config_kwargs)
-
-
-# ---------- Utils ----------
-
-
-@functools.cache
-def _config_attribute_type() -> type | None:
-    """Return the SDK's ``ConfigAttribute`` class if importable, else ``None``."""
-    try:
-        from databricks.sdk.config import ConfigAttribute
-
-        return ConfigAttribute
-    except ImportError:
-        return None
-
-
-@functools.cache
-def _config_params() -> dict[str, _ConfigParam]:
-    """Discover all configurable :class:`Config` fields and their metadata.
-
-    Walks the SDK's ``ConfigAttribute`` descriptors first (they carry env
-    names and reliable type annotations) and falls back to introspecting
-    :meth:`Config.__init__` for any remaining named keyword parameters.
-    Variadic ``*args`` / ``**kwargs`` parameters are skipped so they don't
-    masquerade as real config fields.
-    """
-    config_params: dict[str, _ConfigParam] = {}
-
-    if config_attribute_type := _config_attribute_type():
-        hints = get_type_hints(Config)
-
-        for name, value in vars(Config).items():
-            if isinstance(value, config_attribute_type):
-                ann = hints.get(name, inspect.Parameter.empty)
-                env_names = _attribute_env_names(value)
-                config_params[name] = _ConfigParam.from_annotation(
-                    name, ann, env_names=env_names
-                )
-
-    skip_kinds = {
-        inspect.Parameter.VAR_POSITIONAL,
-        inspect.Parameter.VAR_KEYWORD,
-    }
-    for name, param in inspect.signature(Config).parameters.items():
-        if param.kind in skip_kinds or name in config_params:
-            continue
-        config_params[name] = _ConfigParam.from_annotation(name, param.annotation)
+    config_params.update(kwargs)
 
     return config_params
 
 
-def _attribute_env_names(attribute: Any) -> tuple[str, ...]:
-    """Collect the primary env name and any aliases declared on a descriptor."""
-    names: list[str] = []
-    primary = getattr(attribute, "env", None)
-    if primary:
-        names.append(primary)
-    for alias in getattr(attribute, "env_aliases", None) or ():
-        if alias and alias not in names:
-            names.append(alias)
-    return tuple(names)
+def param_hash(
+    config: Config | None = None,
+    env: ConfigEnv | None = None,
+    **kwargs,
+) -> str:
+    """Return a stable SHA-256 hex digest of the resolved Config kwargs.
+
+    Designed as a cache or rate-limit key for the same caller inputs
+    that would be passed to :func:`create`. This is the cheap path: it
+    operates purely on the merged dict and never constructs a
+    :class:`Config`. Constructing a :class:`Config` triggers
+    ``_resolve_host_metadata`` (HTTP GET to ``host``'s
+    ``/.well-known/databricks-config``), ``_known_file_config_loader``
+    (filesystem read of ``~/.databrickscfg``) and ``init_auth`` (which
+    can itself touch the network or filesystem depending on the
+    credential strategy). A service that wants to dedupe per-caller
+    clients should fingerprint with :func:`param_hash` first and only
+    call :func:`create` on cache miss.
+
+    Fields in :data:`_HASH_IGNORE_FIELDS` are stripped before hashing
+    (file lookup hints and derived auth metadata) so two callers that
+    resolve to the same identity via different load paths fingerprint
+    the same way.
+
+    Values are normalised through ``str()`` and JSON-quoted as they're
+    streamed into the digest. Mappings are emitted with their (encoded)
+    keys sorted so dict ordering doesn't affect the digest. ``None``
+    collapses with the empty string.
+    """
+
+    hasher = hashlib.sha256()
+
+    def _str(value: Any, quote: bool = False) -> str:
+        value_str = str(value) if value is not None else ""
+        return json.dumps(value_str) if quote else value_str
+
+    def _update(value: Any, quote: bool = False):
+        hasher.update(_str(value, quote).encode("utf-8"))
+
+    def _hash(value: Any):
+        if isinstance(value, Mapping):
+            _update("{")
+            key_map = {_str(k, quote=True): k for k in value}
+            for key_str in sorted(key_map.keys()):
+                _update(key_str, quote=False)
+                _update(":")
+                _hash(value[key_map[key_str]])
+                _update(",")
+            _update("}")
+        elif _is_collection(value):
+            _update("[")
+            for item in value:
+                _hash(item)
+                _update(",")
+            _update("]")
+        else:
+            _update(value, quote=True)
+
+    config_params = {}
+    for key, value in params(config, env, **kwargs).items():
+        if key not in _HASH_IGNORE_FIELDS:
+            config_params[key] = value
+
+    _hash(config_params)
+    return hasher.hexdigest()
+
+
+def create(
+    config: Config | None = None,
+    env: ConfigEnv | None = None,
+    **kwargs,
+) -> Config:
+    """Build a new :class:`Config` from ``config`` + ``env`` + ``kwargs``.
+
+    Equivalent to ``Config(**params(config, env, **kwargs))``. See
+    :func:`params` for the precedence rules and ``env`` value semantics.
+    """
+
+    return Config(**params(config, env, **kwargs))
 
 
 @functools.cache
-def _env_lookup() -> dict[str, str]:
-    """Reverse map of every declared env name (and alias) to field name."""
-    lookup: dict[str, str] = {}
-    for name, meta in _config_params().items():
-        for env_name in meta.env_names:
-            lookup[env_name] = name
-    return lookup
+def _env_attributes() -> dict[str, ConfigAttribute]:
+    """Build a cached env-name -> :class:`ConfigAttribute` lookup.
 
-
-def _env_key_to_field(key: str) -> str | None:
-    """Translate an env var key into a :class:`Config` field name.
-
-    Returns ``None`` if the key is not recognized either as an explicit
-    descriptor env name/alias or via the ``DATABRICKS_`` / ``ARM_``
-    conventions.
+    Includes both each attribute's primary :attr:`ConfigAttribute.env` name
+    and any :attr:`ConfigAttribute.env_aliases`. Primary names are
+    populated first so they take precedence over aliases on collision; the
+    first writer wins for any subsequent collisions.
     """
-    if (field := _env_lookup().get(key)) is not None:
-        return field
 
-    if key.startswith(_DATABRICKS_PREFIX):
-        return key.removeprefix(_DATABRICKS_PREFIX).lower()
+    attributes = Config.attributes()
+    if not isinstance(attributes, list):
+        attributes = list(attributes)
 
-    if key.startswith(_ARM_PREFIX):
-        return "azure_" + key.removeprefix(_ARM_PREFIX).lower()
+    env_attributes: dict[str, ConfigAttribute] = {}
 
-    return None
+    def _set_env_attribute(attribute: ConfigAttribute, env: Any):
+        if isinstance(env, str) and env and env not in env_attributes:
+            env_attributes[env] = attribute
+
+    for attribute in attributes:
+        env = getattr(attribute, "env", None)
+        _set_env_attribute(attribute, env)
+
+    for attribute in attributes:
+        env_aliases = getattr(attribute, "env_aliases", None)
+        if _is_collection(env_aliases):
+            for env_alias in env_aliases:
+                _set_env_attribute(attribute, env_alias)
+
+    return env_attributes
 
 
-def _coerce_value(value: str, meta: _ConfigParam) -> Any:
-    """Coerce a string env value into the type declared on ``meta``.
+def _is_collection(value: Any) -> TypeGuard[Collection[Any]]:
+    """Return True if ``value`` is an iterable container we want to walk
+    element-by-element.
 
-    Empty strings become ``None`` for nullable fields. Recognized scalar
-    types (``bool`` / ``int`` / ``float`` / ``str``) are converted directly;
-    anything else (or a parse failure) is passed through unchanged so the
-    SDK can apply its own validation.
+    Excludes ``str`` / ``bytes`` / ``bytearray`` since they're technically
+    ``Collection`` instances but should be treated as scalars by the
+    callers in this module (env-value coercion and hash recursion).
+
+    Declared as a :class:`TypeGuard` so type checkers narrow ``value`` to
+    ``Collection[Any]`` after the call, removing spurious "not iterable"
+    warnings when the source value is typed as ``Any | None``.
     """
-    if value == "" and meta.nullable:
-        return None
-    t = meta.base_type
-    try:
-        if t is bool:
-            bool_value = _parse_bool(value)
-            if bool_value is not None:
-                return bool_value
-        elif t is int:
-            return int(value)
-        elif t is float:
-            return float(value)
-        elif t is str:
-            return value
-    except ValueError:
-        pass
-
-    return value
+    return isinstance(value, Collection) and not isinstance(value, str | bytes | bytearray)
 
 
-def _parse_bool(value: str) -> bool | None:
-    """Parse a human-readable bool string, returning ``None`` if unrecognized."""
-    v = value.strip().lower()
-
-    if v in _TRUE_VALUES:
-        return True
-
-    if v in _FALSE_VALUES:
-        return False
-
-    return None
+if __name__ == "__main__":
+    config = create(env={"DATABRICKS_CONFIG_PROFILE": ["RACETRAC-DEV"]})
+    print(config.as_dict())
+    config = create(env={"DATABRICKS_CONFIG_PROFILE": ["DEFAULT"]})
+    print(config.as_dict())
+    print(param_hash(config))
+    config = create(
+        env={
+            "DATABRICKS_CONFIG_PROFILE": ["DEFAULT"],
+            "DATABRICKS_CONFIG_FILE": "~/.databrickscfg",
+        }
+    )
+    print(config.as_dict())
+    print(param_hash(config))
+    config = Config()
+    print(config.as_dict())
+    print(param_hash(config))

@@ -1,0 +1,38 @@
+# mise dev environment + task runner.
+#
+# https://mise.jdx.dev/
+#
+# Installs ``uv`` (which then handles all Python dependency resolution
+# from ``[dependency-groups].dev`` in pyproject.toml) and exposes the
+# project tasks as ``mise run <name>``.
+
+[tools]
+# Use whatever ``uv`` is already on PATH. Set to a version string (e.g.
+# ``"latest"`` or ``"0.9.5"``) if you want mise to manage the uv binary
+# itself - that requires GitHub API access.
+uv = "system"
+
+
+[tasks.test]
+description = "Run pytest"
+run = "uv run pytest"
+
+[tasks.ruff-fix]
+description = "Auto-fix lint issues and reformat"
+run = "uv run ruff check . --fix --unsafe-fixes && uv run ruff format ."
+
+[tasks.publish]
+description = "Bump version, commit, tag, push (CI publishes to PyPI)"
+depends = ["ruff-fix"]
+usage = """
+arg "<part>" default="patch" help="Version part to bump (patch / minor / major)"
+flag "-m --message <message>" default="incrementing version to {new_version}" help="bump-my-version commit message; ``{new_version}`` is expanded by bump-my-version"
+"""
+run = """
+#!/usr/bin/env bash
+set -e
+git add .
+git diff --staged --quiet || git commit -m "pre-release: staging changes"
+uv run bump-my-version bump "$usage_part" --message "$usage_message"
+git push origin HEAD --tags
+"""
