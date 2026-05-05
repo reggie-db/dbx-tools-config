@@ -31,34 +31,51 @@ def config_params(
     **kwargs,
 ) -> dict[str, Any]: ...
 
-def create_config(
-    config: Config | None = None,
-    env: Mapping[str, Iterable[str] | None] | None = None,
-    **kwargs,
-) -> Config: ...
-
 def config_params_hash(
     config: Config | None = None,
     env: Mapping[str, Iterable[str] | None] | None = None,
     **kwargs,
 ) -> str: ...
+
+def create_config(
+    config: Config | None = None,
+    env: Mapping[str, Iterable[str] | None] | None = None,
+    **kwargs,
+) -> Config: ...
 ```
 
 - `config_params(...)` merges `config.as_dict()` + recognised `env` keys
   + `kwargs` into a single dict suitable for `Config(**...)`.
+- `config_params_hash(...)` returns a SHA-256 hex digest of the merged
+kwargs. **Cheap**:
+pure in-memory compute, no `Config` constructed. See
+[Hashing](#hashing).
 - `create_config(...)` is a one-liner for `Config(**config_params(...))`.
   **Expensive**: triggers `Config.__init__`'s host-metadata HTTP probe,
   `~/.databrickscfg` read and credential strategy bootstrap.
-- `config_params_hash(...)` returns a SHA-256 hex digest of the merged
-  kwargs after dropping fields in `_HASH_IGNORE_FIELDS`. **Cheap**:
-  pure in-memory compute, no `Config` constructed. See
-  [Hashing](#hashing).
+
 
 ## Install
 
-Not published to PyPI - install directly from GitHub via a PEP 508
-direct URL. Works with `pip`, `uv`, `poetry`, etc. - they all read
-`[project].dependencies` from `pyproject.toml`.
+Published on [PyPI](https://pypi.org/project/dbx-tools-config/):
+
+```bash
+pip install dbx-tools-config
+```
+
+In `pyproject.toml`:
+
+```toml
+[project]
+dependencies = [
+    "dbx-tools-config",
+]
+```
+
+### Alternative: install directly from GitHub
+
+Useful for pinning to an unreleased commit or pulling from a fork.
+Works with `pip`, `uv`, `poetry`, etc. via the PEP 508 direct URL form.
 
 `pyproject.toml`:
 
@@ -83,11 +100,11 @@ dependencies = [
 ]
 ```
 
-Then install with whichever tool you use:
+Or install ad-hoc without editing `pyproject.toml`:
 
 ```bash
-pip install .            # or: pip install -e .
-uv sync                  # or: uv add 'dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config'
+pip install 'git+https://github.com/reggie-db/dbx-tools-config'
+uv add 'dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config'
 ```
 
 ## Usage
