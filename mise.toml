@@ -5,7 +5,8 @@
 # Installs ``uv`` (which then handles all Python dependency resolution
 # from ``[dependency-groups].dev`` in pyproject.toml) and exposes the
 # project tasks as ``mise run <name>``.
-
+[tools]
+uv = "latest"
 
 [tasks.test]
 description = "Run pytest"
