@@ -56,16 +56,38 @@ def config_params_hash(
 
 ## Install
 
-```bash
-uv add 'dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config'
-```
+Not published to PyPI - install directly from GitHub via a PEP 508
+direct URL. Works with `pip`, `uv`, `poetry`, etc. - they all read
+`[project].dependencies` from `pyproject.toml`.
 
-or in `pyproject.toml`:
+`pyproject.toml`:
 
 ```toml
+[project]
 dependencies = [
     "dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config",
 ]
+```
+
+Pin to a tag, branch or commit with the standard `@<ref>` suffix:
+
+```toml
+[project]
+dependencies = [
+    # tag
+    "dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config@v0.1.4",
+    # branch
+    "dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config@main",
+    # commit SHA
+    "dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config@<sha>",
+]
+```
+
+Then install with whichever tool you use:
+
+```bash
+pip install .            # or: pip install -e .
+uv sync                  # or: uv add 'dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config'
 ```
 
 ## Usage
