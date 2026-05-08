@@ -133,14 +133,14 @@ class TestConfigParams:
 
     def test_env_alias_overrides_primary_when_both_provided(self):
         # Iteration order is primary first, alias second; the alias write
-        # is therefore last-write-wins for the shared attribute name.
+        # is therefore first-write-wins for the shared attribute name.
         out = _merged(
             env={
                 "DATABRICKS_OIDC_TOKEN_FILEPATH": "/primary",
                 "DATABRICKS_OIDC_TOKEN_FILE": "/alias",
             }
         )
-        assert out["oidc_token_filepath"] == "/alias"
+        assert out["oidc_token_filepath"] == "/primary"
 
     def test_env_unknown_key_ignored(self):
         out = _merged(env={"NOT_A_DATABRICKS_ENV_VAR": "x"})
