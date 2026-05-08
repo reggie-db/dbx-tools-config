@@ -1,59 +1,63 @@
 # dbx-tools-config
 
-Tiny wrapper around `databricks.sdk.config.Config` for **services that
-build a `Config` per request** from caller-supplied inputs - MCP
-servers, brokers, multi-tenant backends, sidecars, agent frameworks,
-etc.
+Small helpers around `databricks.sdk.config.Config` for **services that build a `Config` per request** from caller-supplied inputs: MCP servers, brokers, multi-tenant backends, sidecars, agent frameworks, and similar.
 
-The Databricks SDK auto-discovers config from `os.environ` of the host
-process, which is the wrong scope for a service serving many callers.
-This module lets each request bring its own config-shaped inputs and
-materialise a `Config` (or just a fingerprint) from them. A typical
-mapping for an HTTP/MCP-style request:
+The Databricks SDK discovers config from `os.environ` in the host process. That scope is wrong when one worker serves many tenants or sessions. This package lets each request supply env-shaped data plus optional kwargs and an optional baseline `Config`, then either fingerprint the inputs cheaply or construct a real `Config`.
 
-| Source                                  | dbx-tools-config layer |
+Typical mapping for an HTTP or MCP-style request:
+
+| Source                                  | Constructor argument |
 | --------------------------------------- | ---------------------- |
-| Request headers (env-shaped)            | `env=`                 |
-| POST body / RPC payload `Config` fields | `**kwargs`             |
+| Request headers (env-shaped names)      | `env=`                 |
+| POST body / RPC payload (`Config` keys) | `**kwargs`             |
 | Pre-resolved `Config` baseline          | `config=`              |
 
-Precedence is **`kwargs > env > config`** (last write wins). Every
-layer is optional.
+Precedence **per SDK attribute** is **`kwargs` > `env` > `config.as_dict()`**: the first layer that supplies a value for that attribute wins. Layers are optional. The merged result only contains attributes that were set; it is not a full default-filled dict.
 
 ## API
 
-Three public helpers, all with the same signature:
+Import from the namespace package **`dbx_tools.config`** (wheel module name from `pyproject`):
 
 ```python
-def config_params(
-    config: Config | None = None,
-    env: Mapping[str, Iterable[str] | None] | None = None,
-    **kwargs,
-) -> dict[str, Any]: ...
-
-def config_params_hash(
-    config: Config | None = None,
-    env: Mapping[str, Iterable[str] | None] | None = None,
-    **kwargs,
-) -> str: ...
-
-def create_config(
-    config: Config | None = None,
-    env: Mapping[str, Iterable[str] | None] | None = None,
-    **kwargs,
-) -> Config: ...
+from dbx_tools.config import ConfigParams, ConfigEnv
 ```
 
-- `config_params(...)` merges `config.as_dict()` + recognised `env` keys
-  + `kwargs` into a single dict suitable for `Config(**...)`.
-- `config_params_hash(...)` returns a SHA-256 hex digest of the merged
-kwargs. **Cheap**:
-pure in-memory compute, no `Config` constructed. See
-[Hashing](#hashing).
-- `create_config(...)` is a one-liner for `Config(**config_params(...))`.
-  **Expensive**: triggers `Config.__init__`'s host-metadata HTTP probe,
-  `~/.databrickscfg` read and credential strategy bootstrap.
+### `ConfigParams`
 
+```python
+class ConfigParams(Mapping[str, Any]):
+    def __init__(
+        self,
+        config: Config | None = None,
+        env: ConfigEnv | None = None,
+        **kwargs: Any,
+    ) -> None: ...
+
+    def hash(self) -> str:
+        """SHA-256 hex digest of merged params; no Config built."""
+
+    def create_config(self) -> Config:
+        """Config(**merged); runs full SDK __init__."""
+
+```
+
+- **`ConfigParams(...)`** returns a read-only mapping of merged kwargs suitable for `Config(**...)`.
+- **`hash()`** returns a stable **SHA-256** hex digest from that merge **without** constructing `Config`. Use this for caches and rate limits.
+- **`create_config()`** is **`Config(**merged)`**. **Expensive**: triggers host-metadata HTTP (`/.well-known/databricks-config`), `~/.databrickscfg` reads, and credential bootstrap as in upstream `Config.__init__`.
+
+Equivalent patterns:
+
+```python
+params = ConfigParams(env=headers, **body)
+client_config = params.create_config()
+
+# Merged dict only
+merged = dict(ConfigParams(env=headers, **body))
+```
+
+### `ConfigEnv`
+
+Type alias (structural): either a **string-keyed mapping** of env var name to value, or an **iterable of `(name, value)`** pairs. Unrecognised names are ignored. Duplicate keys in the pair form: **first wins**.
 
 ## Install
 
@@ -109,88 +113,81 @@ uv add 'dbx-tools-config @ git+https://github.com/reggie-db/dbx-tools-config'
 
 ## Usage
 
-### Server-style: per-request Config from headers + body
+### Server-style: per-request `Config` from headers + body
 
 ```python
-import dbx_tools_config
+from dbx_tools.config import ConfigParams
 from databricks.sdk import WorkspaceClient
 
-# An MCP-style handler. Headers carry env-shaped names, the body
-# carries Config field overrides.
 def handle_request(request):
-    config = dbx_tools_config.create_config(
-        env=request.headers,         # e.g. {"DATABRICKS_HOST": "...",
-                                     #       "DATABRICKS_TOKEN": "..."}
-        **request.json(),            # e.g. {"warehouse_id": "abc",
-                                     #       "cluster_id": "xyz"}
+    params = ConfigParams(
+        env=request.headers,
+        **request.json(),
     )
+    config = params.create_config()
     return WorkspaceClient(config=config).do_work(...)
 ```
 
 ### Other shapes
 
 ```python
-# From an arbitrary env-shaped mapping
-config = dbx_tools_config.create_config(env={
+from dbx_tools.config import ConfigParams
+
+# From an env-shaped mapping
+params = ConfigParams(env={
     "DATABRICKS_HOST": "https://myworkspace.cloud.databricks.com",
     "DATABRICKS_TOKEN": "dapi...",
 })
 
 # From the process environment (single-tenant CLIs, scripts, tests)
 import os
-config = dbx_tools_config.create_config(env=os.environ)
+params = ConfigParams(env=os.environ)
 
-# Kwargs always win over env
-config = dbx_tools_config.create_config(
+# Kwargs override env for the same attribute
+params = ConfigParams(
     host="https://override.cloud.databricks.com",
     env=client_env,
 )
 
-# Round-trip an existing Config (e.g. as a baseline)
-config = dbx_tools_config.create_config(config=other_config, host="https://override...")
+# Baseline Config plus overrides
+params = ConfigParams(config=other_config, host="https://override...")
 
-# Just the merged kwargs, without constructing a Config
-kwargs = dbx_tools_config.config_params(config=other_config, env=client_env)
+# Dict of merged kwargs only (no Config constructed)
+merged = dict(ConfigParams(config=other_config, env=client_env))
 ```
 
 ## Env value semantics
 
-Each value in the `env` mapping may be:
+Each value associated with a recognised env key may be:
 
-| Value           | Behavior                                                         |
-| --------------- | ---------------------------------------------------------------- |
-| `str`           | Used directly.                                                   |
-| `None`          | Sets the field to `None` (clears any baseline from `config=`).   |
-| `Iterable[str]` | First element wins; matches multi-value HTTP / multidict frames. |
-| empty iterable  | Field is left untouched.                                         |
+| Value           | Behavior |
+| --------------- | -------- |
+| `str`           | Used directly. |
+| `None`          | Sets the field to `None` for this layer (clears a baseline from `config=` for that attribute). |
+| Iterable (not `str` / bytes) | First element is used (multi-value HTTP / multidict style). Includes iterators such as `iter([a, b])`. |
+| Empty iterable  | That attribute is **not** set by this `env` layer (different from `None`). |
+
+Partial `env` frames do **not** zero out other attributes that come only from `config`.
 
 ## Env key resolution
 
-Each key in the `env` mapping is matched against the SDK's declared
-`ConfigAttribute.env` (and any `env_aliases`) on `Config`. Examples that
-the SDK declares today:
+Each key in `env` is matched against the SDK's declared `ConfigAttribute.env` (and `env_aliases`) on `Config`. Examples the SDK declares today include:
 
-- `DATABRICKS_HOST` -> `host`
-- `DATABRICKS_TOKEN` -> `token`
-- `DATABRICKS_CLUSTER_ID` -> `cluster_id`
-- `DATABRICKS_OIDC_TOKEN_FILE` -> `oidc_token_filepath` (alias)
-- `DATABRICKS_AZURE_RESOURCE_ID` -> `azure_workspace_resource_id`
-- `ARM_TENANT_ID` -> `azure_tenant_id`
-- `GOOGLE_CREDENTIALS` -> `google_credentials`
+- `DATABRICKS_HOST` → `host`
+- `DATABRICKS_TOKEN` → `token`
+- `DATABRICKS_CLUSTER_ID` → `cluster_id`
+- `DATABRICKS_OIDC_TOKEN_FILE` → `oidc_token_filepath` (alias)
+- `DATABRICKS_AZURE_RESOURCE_ID` → `azure_workspace_resource_id`
+- `ARM_TENANT_ID` → `azure_tenant_id`
+- `GOOGLE_CREDENTIALS` → `google_credentials`
 
-Keys that don't match a declared env name (or alias) are silently ignored.
+Keys that do not match a declared env name or alias are ignored.
 
-> Note: this module does **not** perform string-to-bool/int/float coercion.
-> Values are forwarded to `Config(**kwargs)` as-is and the SDK's descriptor
-> `transform` (typically just the annotated type) does any conversion.
-> Be aware that the SDK uses `bool(value)` for boolean fields, so the
-> string `"false"` will resolve to `True`. Pass real Python booleans via
-> `kwargs` if you care.
+> This package does **not** add string-to-bool/int coercion beyond normalising env frames to scalars. Values are passed through to `Config(**kwargs)` and the SDK descriptors apply conversion. The SDK uses `bool(value)` for boolean fields, so the string `"false"` can become `True`. Pass real Python booleans via `kwargs` when that matters.
 
 ### Out of scope: ambient env vars
 
-A handful of `databricks-sdk` features read env vars directly from
-`os.environ` instead of going through `Config`:
+Some `databricks-sdk` features read env vars directly from `os.environ` instead of through `Config`:
 
 - `DATABRICKS_RUNTIME_VERSION` (DBR detection / user-agent)
 - `IS_IN_DB_MODEL_SERVING_ENV`, `IS_IN_DATABRICKS_MODEL_SERVING_ENV`,
@@ -201,66 +198,41 @@ A handful of `databricks-sdk` features read env vars directly from
 - `SYSTEM_ACCESSTOKEN`, `SYSTEM_*` (Azure DevOps OIDC)
 - `AGENT` (user-agent)
 
-Forwarding these through `dbx_tools_config.create_config(env=...)` has
-no effect because they bypass `Config` entirely. If you need them in a
-service context, set them on `os.environ` of the worker process before
-constructing the SDK client.
+Passing these through `ConfigParams(env=...)` does not affect code paths that bypass `Config`. Set them on `os.environ` in the worker if you rely on them.
 
 ## Hashing
 
-`dbx_tools_config.config_params_hash(...)` returns a stable SHA-256 hex
-digest of the resolved kwargs without constructing a `Config`. This
-matters because `Config.__init__` is **not** free - it does (in order):
+`ConfigParams(...).hash()` returns a stable SHA-256 hex digest without constructing `Config`. `Config.__init__` is costly because it runs steps such as:
 
-1. `_resolve_host_metadata` - HTTP `GET host/.well-known/databricks-config`
-   to discover `account_id`, `workspace_id`, `cloud`, `discovery_url`.
-2. `_known_file_config_loader` - reads `~/.databrickscfg` from disk if
-   no auth is configured directly.
-3. `_validate` - checks for conflicting auth methods.
-4. `init_auth` - bootstraps the credential strategy (which itself may
-   shell out to the Databricks CLI, fetch a token from disk, etc).
+1. `_resolve_host_metadata` — HTTP `GET host/.well-known/databricks-config`
+2. `_known_file_config_loader` — reads `~/.databrickscfg` when auth is indirect
+3. `_validate` — conflicting auth checks
+4. `init_auth` — credential strategy (CLI, token files, etc.)
 
-For a service that fans many requests over a small set of logical
-identities, hashing first lets you cache (or rate-limit) clients
-without paying any of the above per request:
+Example cache keyed by fingerprint:
 
 ```python
-import dbx_tools_config
+from dbx_tools.config import ConfigParams
 from databricks.sdk import WorkspaceClient
 
 _clients: dict[str, WorkspaceClient] = {}
 
 def client_for(request):
-    key = dbx_tools_config.config_params_hash(env=request.headers, **request.json())
+    params = ConfigParams(env=request.headers, **request.json())
+    key = params.hash()
     client = _clients.get(key)
     if client is None:
-        config = dbx_tools_config.create_config(env=request.headers, **request.json())
-        client = _clients[key] = WorkspaceClient(config=config)
+        client = _clients[key] = WorkspaceClient(config=params.create_config())
     return client
 ```
 
-The digest deliberately ignores fields that don't change *which*
-workspace / account is being addressed or *how* it's being authenticated:
+The digest includes **every** declared `Config` attribute from the SDK; attributes you did not set in the merge still appear in the fingerprint as `None`, so fields such as `profile` or `auth_type` affect the hash when they are present in the merged mapping.
 
-| Group                   | Fields ignored                                              |
-| ----------------------- | ----------------------------------------------------------- |
-| Source / lookup         | `profile`, `config_file`, `databricks_cli_path`             |
-| Derived during init     | `auth_type`, `databricks_environment`                       |
+Normalisation for hashing:
 
-So two configs that resolve to the same identity but were loaded from
-different `DATABRICKS_CONFIG_PROFILE` / `DATABRICKS_CONFIG_FILE` paths,
-via a different CLI binary, or that happened to be tagged with a
-different derived `auth_type`, fingerprint the same way.
-
-Normalisation:
-
-- Mapping keys are sorted (after JSON-encoding) so dict ordering does
-  not affect the digest.
-- `None` collapses with the empty string so an explicit `None` value
-  hashes the same as an explicit `""`.
-- Iterables (other than strings) preserve their order.
-- Scalar values are stringified via `str()` and JSON-quoted before
-  being streamed into the digest.
+- Scalar values are stringified with `str()` and JSON-encoded in a canonical structure.
+- Mapping keys are sorted so ordering does not affect the digest.
+- `None` and `""` hash the same for a given attribute.
 
 ## Development
 

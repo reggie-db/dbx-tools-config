@@ -10,11 +10,9 @@ version = "0.1.8"
 description = "Build and fingerprint databricks.sdk Config instances from server-supplied env or kwargs."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["databricks-sdk"]
-# PEP 639: SPDX identifier in ``license`` plus explicit ``license-files``;
-# the deprecated ``License :: OSI Approved :: ...`` classifier is gone.
 license = "Unlicense"
 license-files = ["LICENSE"]
+dependencies = ["databricks-sdk"]
 keywords = [
     "databricks",
     "databricks-sdk",
@@ -37,7 +35,17 @@ classifiers = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff", "bump-my-version"]
+dev = [
+    "pytest>=8.0",
+    "ruff",
+    "bump-my-version",
+    "lfp-build @ git+https://github.com/regbo/lfp-build-py.git",
+]
+
+[tool.uv.build-backend]
+module-name = "dbx_tools.config"
+module-root = "src"
+namespace = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
