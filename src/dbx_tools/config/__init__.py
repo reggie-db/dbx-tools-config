@@ -219,13 +219,12 @@ def _env_params(env: ConfigEnv | None) -> Mapping[str, Any] | None:
             continue
         elif _is_collection(env_value):
             if not env_value:
-                env_value = None
+                continue
             else:
                 for v in env_value:
                     env_value = v
                     break
-        else:
-            env_params[attribute.name] = env_value
+        env_params[attribute.name] = env_value
     return env_params
 
 
